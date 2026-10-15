@@ -7,6 +7,7 @@ from datetime import UTC, datetime as dt, timedelta
 from jdatetime import date as jd
 
 from app.core.hosts import host_manager
+from app.core.admin_host_overrides import get_admin_host_overrides
 from app.db.crud.wireguard import pick_peer_ip_for_inbound
 from app.db.models import UserStatus
 from app.models.status_emojis import STATUS_EMOJIS
@@ -424,9 +425,30 @@ async def process_inbounds_and_tags(
 ) -> str | bytes:
     proxy_settings = user.proxy_settings.dict()
     proxy_settings["_user_id"] = user.id
-    hosts = await filter_hosts(list((await host_manager.get_hosts()).values()), user.status)
+    # --- My Hosts: apply the current admin's per-account customizations ---
+    host_map = await host_manager.get_hosts()
+    admin_id = getattr(getattr(user, "admin", None), "id", None)
+    overrides = await get_admin_host_overrides(admin_id) if admin_id else {}
+    hosts = []
+    for _hid, _hd in host_map.items():
+        if _hd.status and user.status not in _hd.status:
+            continue
+        _ov = overrides.get(_hid)
+        if _ov:
+            if _ov.get("is_disabled"):
+                continue
+            if _ov.get("display_name") or _ov.get("sort_order") is not None:
+                _hd = _hd.model_copy(deep=True)
+                if _ov.get("display_name"):
+                    _hd.remark = _ov["display_name"]
+                if _ov.get("sort_order") is not None:
+                    _hd.priority = _ov["sort_order"]
+        hosts.append(_hd)
+    # --- end My Hosts ---
     if randomize_order and len(hosts) > 1:
         random.shuffle(hosts)
+    else:
+        hosts.sort(key=lambda h: h.priority)
 
     def _resolve_host_xray_template_content(inbound: SubscriptionInboundData) -> str | None:
         if xray_template_overrides is None:
